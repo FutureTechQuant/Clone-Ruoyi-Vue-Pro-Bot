@@ -7,8 +7,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
-    # 启动服务容器（用于测试）
+
     services:
       postgres:
         image: postgres:16
@@ -23,7 +22,7 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
-      
+
       redis:
         image: redis:7-alpine
         options: >-
@@ -33,7 +32,7 @@ jobs:
           --health-retries 5
         ports:
           - 6379:6379
-    
+
     steps:
       - uses: actions/checkout@v4
 
@@ -44,18 +43,15 @@ jobs:
           java-version: '17'
           cache: maven
 
-      - name: Build with Maven (with environment variables)
+      - name: Build with Maven
         env:
-          # 数据库配置
           DB_HOST: localhost
           DB_USERNAME: postgres
           DB_PASSWORD: postgres_ci_password
-          # Redis 配置
           REDIS_HOST: localhost
           REDIS_PASSWORD: ""
         run: |
           echo "🔧 使用 CI 环境变量进行编译..."
-          # 方式1：通过 Maven 系统属性传递（推荐）
           mvn -B package --file pom.xml \
             -Dmaven.test.skip=true \
             -DDB_HOST="${DB_HOST}" \
@@ -63,7 +59,6 @@ jobs:
             -DDB_PASSWORD="${DB_PASSWORD}" \
             -DREDIS_HOST="${REDIS_HOST}" \
             -DREDIS_PASSWORD="${REDIS_PASSWORD}"
-          
           echo "✅ 编译完成"
 
       - name: Verify JAR file
@@ -103,6 +98,94 @@ jobs:
             exit 1
           fi
 
+      - name: Upsert Cloudflare DNS for backend.fscitech.net
+        env:
+          CF_ZONE: ${{ secrets.CLOUDFLARE_ZONE }}
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_TOKEN }}
+          SERVER_IP: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+
+          RECORD_ID=$(curl -sf \
+            "https://api.cloudflare.com/client/v4/zones/${CF_ZONE}/dns_records?type=A&name=backend.fscitech.net" \
+            -H "Authorization: Bearer ${CF_TOKEN}" \
+            -H "Content-Type: application/json" \
+            | jq -r '.result[0].id // empty')
+
+          PAYLOAD=$(jq -n \
+            --arg ip "${SERVER_IP}" \
+            '{"type":"A","name":"backend.fscitech.net","content":$ip,"ttl":1,"proxied":true}')
+
+          if [ -n "${RECORD_ID}" ]; then
+            echo "🔄 更新 DNS 记录 ${RECORD_ID}..."
+            curl -sf -X PUT \
+              "https://api.cloudflare.com/client/v4/zones/${CF_ZONE}/dns_records/${RECORD_ID}" \
+              -H "Authorization: Bearer ${CF_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data "${PAYLOAD}" | jq -e '.success'
+          else
+            echo "➕ 创建 DNS 记录..."
+            curl -sf -X POST \
+              "https://api.cloudflare.com/client/v4/zones/${CF_ZONE}/dns_records" \
+              -H "Authorization: Bearer ${CF_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data "${PAYLOAD}" | jq -e '.success'
+          fi
+          echo "✅ DNS backend.fscitech.net → ${SERVER_IP} (proxied)"
+
+      - name: Configure nginx for backend.fscitech.net
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          port: ${{ secrets.SSH_PORT }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            set -e
+            CONF=/etc/nginx/conf.d/backend-fscitech.conf
+            cat > "${CONF}" << 'NGINX_EOF'
+            server {
+                listen 80;
+                server_name backend.fscitech.net;
+
+                # 恢复 Cloudflare 真实客户端 IP
+                set_real_ip_from 103.21.244.0/22;
+                set_real_ip_from 103.22.200.0/22;
+                set_real_ip_from 103.31.4.0/22;
+                set_real_ip_from 104.16.0.0/13;
+                set_real_ip_from 104.24.0.0/14;
+                set_real_ip_from 108.162.192.0/18;
+                set_real_ip_from 131.0.72.0/22;
+                set_real_ip_from 141.101.64.0/18;
+                set_real_ip_from 162.158.0.0/15;
+                set_real_ip_from 172.64.0.0/13;
+                set_real_ip_from 173.245.48.0/20;
+                set_real_ip_from 188.114.96.0/20;
+                set_real_ip_from 190.93.240.0/20;
+                set_real_ip_from 197.234.240.0/22;
+                set_real_ip_from 198.41.128.0/17;
+                real_ip_header CF-Connecting-IP;
+
+                location / {
+                    proxy_pass         http://127.0.0.1:48080;
+                    proxy_http_version 1.1;
+                    proxy_set_header   Connection        "";
+                    proxy_set_header   Host              $host;
+                    proxy_set_header   X-Real-IP         $remote_addr;
+                    proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+                    proxy_set_header   X-Forwarded-Proto https;
+
+                    proxy_connect_timeout  60s;
+                    proxy_send_timeout     60s;
+                    proxy_read_timeout    300s;
+                    proxy_buffering        off;
+                    client_max_body_size   100m;
+                }
+            }
+            NGINX_EOF
+            nginx -t && systemctl reload nginx
+            echo "✅ nginx backend-fscitech.conf 已更新并 reload"
+
       - name: Copy JAR to server
         uses: appleboy/scp-action@v1
         with:
@@ -132,10 +215,10 @@ jobs:
           script: |
             set -e
             cd /usr/local/myapp
-            
+
             echo "📦 验证文件..."
             ls -lh future-server.jar
-            
+
             echo "🔧 更新 .env 文件..."
             cat > .env << EOF
             DB_HOST=${DB_HOST}
@@ -144,22 +227,22 @@ jobs:
             REDIS_HOST=${REDIS_HOST}
             REDIS_PASSWORD=${REDIS_PASSWORD}
             EOF
-            
+
             echo "🏗️  构建镜像（如果需要）..."
             docker compose build
-            
+
             echo "🔄 重启服务..."
             docker compose down
             docker compose up -d
-            
+
             echo "⏳ 等待服务启动..."
             sleep 10
-            
+
             echo "✅ 服务状态："
             docker compose ps
-            
+
             echo "📋 应用日志（最后 30 行）："
             docker compose logs --tail 30 my-app
-            
+
             echo "🏥 健康检查："
             docker compose exec -T my-app curl -s http://localhost:48080/actuator/health || echo "⚠️  健康检查失败（应用可能还在启动中）"
