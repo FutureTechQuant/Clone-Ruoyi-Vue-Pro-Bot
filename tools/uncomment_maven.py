@@ -24,7 +24,7 @@ ENABLE_ARTIFACTS = {
     "future-module-crm-biz",
     "future-module-erp-biz",
     "future-module-ai-biz",
-    "future-module-iot-biz",
+    # "future-module-iot-biz",
 }
 
 def uncomment_line(line: str) -> str:
