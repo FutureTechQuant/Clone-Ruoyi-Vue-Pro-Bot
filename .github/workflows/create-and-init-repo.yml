@@ -77,7 +77,6 @@ jobs:
                  source/Readme.md source/yudao-ui source/sql
 
           (cd source && python3 ../tools/replace_all.py)
-          (cd source && python3 ../tools/uncomment_maven.py)
 
           mkdir -p source/.github/workflows
           if [ ! -f "templates/workflows/maven.yml" ]; then
@@ -92,6 +91,7 @@ jobs:
 
           (cd repo_content && python3 ../tools/restructure_layout.py)
           (cd repo_content && python3 ../tools/split_api_biz.py)
+          (cd repo_content && python3 ../tools/uncomment_maven.py)
           (cd repo_content && python3 ../tools/patch_application_local.py)
 
       - name: Create new GitHub repo (org)
