@@ -20,7 +20,7 @@ ROOT_MODULES_XML = """<modules>
     </modules>"""
 
 # 目录移动计划：key=旧目录（相对 repo 根），value=新目录
-# 注意：这里只移动“顶层模块目录”。模块内部结构（例如 future-module-mall 下的子模块）保持原样。
+# 注意：这里只移动"顶层模块目录"。模块内部结构保持原样。
 MOVE_PLAN = {
     "future-dependencies": "platform/future-dependencies",
     "future-framework": "platform/future-framework",
@@ -55,7 +55,7 @@ def ensure_dir(p: Path):
 
 def move_dir(src: Path, dst: Path):
     """
-    尽量“可重复运行”：
+    尽量"可重复运行"：
     - src 不存在：跳过
     - dst 已存在：跳过（认为已经移动过）
     """
@@ -158,20 +158,48 @@ def write_aggregator_pom(pom_path: Path, artifact_id: str, modules: list[str]):
     print(f"✅ wrote aggregator pom: {pom_path}")
 
 
+def move_custom_modules():
+    """
+    移动不在MOVE_PLAN中的future-module-xxx模块到modules/custom/xxx
+    """
+    custom_base = Path("modules/custom")
+    custom_modules = []
+    
+    # 扫描当前目录下以"future-module-"开头的目录
+    for item in Path(".").iterdir():
+        if item.is_dir() and item.name.startswith("future-module-") and item.name not in MOVE_PLAN:
+            # 从目录名中提取模块名（去掉"future-module-"前缀）
+            module_name = item.name[len("future-module-"):]
+            dst = custom_base / module_name
+            move_dir(item, dst)
+            custom_modules.append(module_name)
+    
+    return custom_modules
+
+
 def main():
     if not ROOT_POM.exists():
         raise RuntimeError("❌ Run this script at repo root (pom.xml not found).")
 
-    # 1) 移动目录
+    # 1) 移动预定义目录
     for s, d in MOVE_PLAN.items():
         move_dir(Path(s), Path(d))
-
-    # 2) 先 patch root pom 的 modules，让 reactor 能找到新路径下的模块
+    
+    # 2) 移动自定义模块
+    print("\n🔍 扫描并移动自定义模块...")
+    custom_modules = move_custom_modules()
+    if custom_modules:
+        print(f"✅ 已移动 {len(custom_modules)} 个自定义模块到 modules/custom/")
+    
+    # 3) 先 patch root pom 的 modules，让 reactor 能找到新路径下的模块
     patch_root_modules(ROOT_POM)
 
-    # 3) 生成你要的 modules/ 聚合层（这些是新增的“目录聚合 pom”，不改任何业务模块的 GAV）
-    # 顶层 modules 聚合
-    write_aggregator_pom(Path("modules/pom.xml"), "future-modules", ["core", "biz", "extend"])
+    # 4) 生成你要的 modules/ 聚合层
+    # 动态构建modules列表
+    modules_list = ["core", "biz", "extend"]
+    if custom_modules:  # 如果有自定义模块，就加入custom
+        modules_list.append("custom")
+    write_aggregator_pom(Path("modules/pom.xml"), "future-modules", modules_list)
 
     # core/biz/extend 聚合
     write_aggregator_pom(Path("modules/core/pom.xml"), "future-modules-core", ["system", "infra"])
@@ -181,8 +209,21 @@ def main():
     if ENABLE_IOT_IN_AGGREGATOR:
         extend_list.append("iot")
     write_aggregator_pom(Path("modules/extend/pom.xml"), "future-modules-extend", extend_list)
+    
+    # 如果有自定义模块，生成custom聚合pom
+    if custom_modules:
+        write_aggregator_pom(Path("modules/custom/pom.xml"), "future-modules-custom", custom_modules)
+        # 为每个自定义模块生成对应的聚合pom
+        for module in custom_modules:
+            # 自定义模块的目录名是去掉前缀后的名称
+            module_dir_name = f"future-module-{module}"
+            write_aggregator_pom(
+                Path(f"modules/custom/{module}/pom.xml"), 
+                f"future-custom-{module}", 
+                [module_dir_name]
+            )
 
-    # 每个域下面再放一个“目录级聚合 pom”，让结构更清晰
+    # 5) 每个域下面再放一个"目录级聚合 pom"，让结构更清晰
     # core
     write_aggregator_pom(Path("modules/core/system/pom.xml"), "future-core-system", ["future-module-system"])
     write_aggregator_pom(Path("modules/core/infra/pom.xml"), "future-core-infra", ["future-module-infra"])
@@ -200,7 +241,7 @@ def main():
     if ENABLE_IOT_IN_AGGREGATOR:
         write_aggregator_pom(Path("modules/extend/iot/pom.xml"), "future-ext-iot", ["future-module-iot"])
 
-    # 4) 给所有“父 POM=root future”的模块补 relativePath（移动后必须）
+    # 6) 给所有"父 POM=root future"的模块补 relativePath（移动后必须）
     changed = 0
     for pom in Path(".").rglob("pom.xml"):
         if pom.resolve() == ROOT_POM.resolve():
@@ -213,6 +254,8 @@ def main():
             raise RuntimeError(f"❌ failed to patch {pom}: {e}") from e
 
     print(f"🎉 done. patched parent relativePath count = {changed}")
+    if custom_modules:
+        print(f"📦 自定义模块 ({len(custom_modules)} 个): {', '.join(custom_modules)}")
 
 
 if __name__ == "__main__":
