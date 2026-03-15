@@ -71,7 +71,7 @@ jobs:
           set -euo pipefail
 
           git clone -q -b master-jdk17 --depth=1 --single-branch \
-            https://github.com/FutureTechQuant/ruoyi-vue-pro source
+            https://github.com/FutureTechQuant/ruoyi-vue-pro.git source
 
           rm -rf source/.git source/.gitee source/.github source/.image \
                  source/Readme.md source/yudao-ui source/sql
